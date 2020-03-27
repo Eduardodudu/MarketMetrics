@@ -1,0 +1,1176 @@
+---
+title: "Market Metrics"
+author: "Eduardo Almeida"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: yes
+  html_document:
+    code_folding: show
+    theme: cerulean
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Executive summary
+
+This capstone program is based on evaluating how financial metrics relates to each sector and how to explore which components tends to deliver the best overall risk mitigation portfolio decision and how to create a porftolio.
+
+The data used for this project is on companies that are in the SP500 index. First there is an exploratory analysis of the data and how it relates to the metrics from industries and sector segments as well as its price and risk.
+
+Sectors are then evaluated by daily prices in order to determine the best set of clusters that represents the groups of sectors presented in the SP500.
+
+The first portfolio is created per sector to understand which sectors to chose in order to mitigate risks per ROI (Return on investment), then a second porfolio is created in each sector to evaluate the best and worst companies to mitigate risk.
+
+All 57 metrics are then evaluated per sector and the best and worst companies of porftolio in order to understand how they relate with sectors and risk mitigation.
+
+Lastly the price of the chosen companies of porftolio are predicted and the porfolio is rebalanced per period in order to evaluate how prices prediction changes the behavior of risk mitigation.
+
+
+
+## Introduction
+
+This project aims to understand how financial metrics relates to each sector and how to explore which components tends to deliver the best overall risk mitigation portfolio decision and how to create a porftolio.
+
+This is a personal attempt to merge a brief study on machine learning techniques and financial analysis from courses from michigan coursera and harvardx. From my perspectiva, most of the financial analysis is usually based on the ratio of risk versus return of an investment.
+
+The issue is that studies teach us how to evaluate companies based on a set of benchmarked metrics and to evaluate data manually, my intent is to organize it in a broader perspective and gather as much data as possible in order to evaluate criticaly how financial metrics work per companies segments and how to use this information to evaluate risk and return of a portfolio investment.
+
+This is a broad area of study and many metrics and analysis are beyond my understanding. This means that conceptual mistakes can happen, but I'm willing to evaluate this in order to achieve a better understanding of the market.
+
+## Geting Data
+
+### Libraries
+
+Load the packages needed for this project:
+
+- Handle API: `library(httr)` and `library(jsonlite)`  
+- Tidy metrics: `library(tidyverse)` 
+- List manipulation: `library(purrr)`
+- Data preparation: `library(recipes)` and `library(janitor)` 
+- Data exploration visual: `library(patchwork)` and `library(ggstatsplot)`
+- Machine learning models: `library(h2o)`
+- Time based preparation: `library(anytime)`, `library(timetk)` and `library(tibbletime)`
+- Markdown tables: `library(knitr)` and `library(kableExtra)`
+- Portfolio Analytics: `library(PortfloioAnalytics)`
+
+
+```{r libraries, message=FALSE, warning = FALSE}
+
+require(httr) #Working with url
+library(jsonlite) #Working with json data for API
+library(tidyverse) #Tidy dataframe packages
+library(purrr) #list manipulation
+library(janitor) # Data cleansing and pivot
+library(patchwork) #Easy grid arrange of ggplots
+library(tidyquant) #Set of finance packages
+library(anytime) #read any type of date format
+library(readxl) #read/write excel data
+library(stringr) #string manipulation
+library(timetk) #tibble format for time based dataframe
+library(tibbletime) #tibble format for time based dataframe
+library(PortfolioAnalytics) #Porfolio analysis
+library(ROI) #Optimization package
+library(ROI.plugin.glpk) #Plugins needed
+library(ROI.plugin.quadprog) #Plugins needed
+library(knitr) #Tables in rmd
+library(kableExtra) #Graphics for knitr tables
+library(cowplot) #Grid plot for list plots
+library(ggstatsplot) #Statistical testing in plot
+library(h2o) #Machine learning models
+library(lime) #Allow for black box models to be easily evaluated
+library(lubridate) #Allow for changes in date format
+
+library(gridExtra)
+library(ggdendro)
+library(zoo)
+library(tsibble)
+library(broom)
+
+
+
+options(scipen=999)
+
+```
+
+
+### Data
+
+The data obtained is from an API from financialmodelingprep.com which consists of:
+
+```{r APIData, cache=TRUE}
+
+API_Structure <- tribble(
+  ~Category, ~Informaton, ~url, ~Options, ~TimeUpdate,
+  "Company Valuation","Symbols List", "https://financialmodelingprep.com/api/v3/company/stock/list", NULL, NULL,
+  "Company Valuation", "Company Profile","https://financialmodelingprep.com/api/v3/company/profile/","company", "Minute",
+  "Company Valuation", "Income Statement","https://financialmodelingprep.com/api/v3/financials/income-statement/","company, time", "Annual/Quarter",
+  "Company Valuation", "Balance Sheet Statement", "https://financialmodelingprep.com/api/v3/financials/balance-sheet-statement/","company, time",  "Annual/Quarter",
+  "Company Valuation", "Cash Flow Statement", "https://financialmodelingprep.com/api/v3/financials/cash-flow-statement/", "company, time",  "Annual/Quarter",
+  "Company Valuation", "Company Financial Ratios", "https://financialmodelingprep.com/api/v3/financial-ratios/", "Company", "Annual",
+  "Company Valuation", "Company Enterprise Value",  "https://financialmodelingprep.com/api/v3/enterprise-value/", "company, time",  "Annual/Quarter",
+  "Company Valuation", "Company Key Metrics", "https://financialmodelingprep.com/api/v3/company-key-metrics/", "company, time",  "Annual/Quarter",
+  "Company Valuation", "Company Rating", "https://financialmodelingprep.com/api/v3/company/rating/", "Company", "Daily",
+  "Stock Price", "Stock Real-time Price", "https://financialmodelingprep.com/api/v3/stock/real-time-price/", "Company", "Real-time",
+  "Stock Price", "Historical Daily Price", "https://financialmodelingprep.com/api/v3/historical-price-full/", "Company", "Daily"
+) %>%
+  mutate(id = row_number()) %>%
+  select(id, everything())
+
+
+kable(API_Structure[,-1], caption = "API Structure") %>%
+  kable_styling(full_width = F)
+```
+
+
+#### Brief overview of stock lists
+
+In order to use the API structure two functions are created to help getting the data 
+
+```{r StockListsFunctions, cache=TRUE}
+#Company informations
+GetCompanyProfile <- function(url, company = NULL){
+  
+headers = c(
+  `Upgrade-Insecure-Requests`= '1'
+)
+
+params = list(
+  `datatype` = 'json'
+)
+
+res <- httr::GET(url = paste0(url,"/",company),
+                 httr::add_headers(.headers=headers), query = params)
+
+data <- content(res, as = "text")
+
+data <- fromJSON(data, flatten = T) %>%
+  flatten_dfr()
+
+return(data)
+  
+}
+
+#Get data from API structure
+GetData <- function(url, company = NULL, Period = NULL){
+
+  
+headers = c(
+  `Upgrade-Insecure-Requests`= '1'
+)
+
+params = list(
+  `datatype` = 'json'
+)
+
+  
+  
+if (is.null(company) & is.null(Period)) {
+  res <- httr::GET(url = url,
+                   httr::add_headers(.headers=headers), query = params)
+  
+} else if (is.null(Period)) {
+  res <- httr::GET(url = paste0(url,"/",company),
+                   httr::add_headers(.headers=headers), query = params)
+  
+} else {
+  res <- httr::GET(url = paste0(url,"/",company, "?period=",Period),
+                   httr::add_headers(.headers=headers), query = params)
+}
+  
+data <- content(res, as = "text")
+
+data <- fromJSON(data, flatten = T) %>%
+        detect(is.data.frame) %>%
+        as_tibble()
+
+return(data)
+
+}
+
+```
+
+
+Let's get all company symbols from the API
+
+```{r StockListsFull, cache = TRUE}
+Stock_Lists <- GetData(url = "https://financialmodelingprep.com/api/v3/company/stock/list")
+
+glimpse(Stock_Lists)
+```
+
+There is 13584 symbols, in order to explore the data we must choose a sample set from this dataset. In order to understand each sector, SP500 companies are a good choice since it is usually used to define how the US market is and represents a great variety of sectors and industries segments.
+
+
+```{r StockListsSP500, cache = TRUE}
+
+#SP500 Indexes
+SP500 <- tq_index("SP500")
+
+
+Stock_Lists <- GetData(url = "https://financialmodelingprep.com/api/v3/company/stock/list") %>%
+               filter(symbol %in% SP500$symbol) %>% #Symbols of SP500 
+               filter(!symbol %in% c("J","AMCR")) #Companies that doesn't have data from API and causes error
+
+
+glimpse(Stock_Lists)
+```
+
+#### Project Data
+
+From the API structure the data required for this project is:
+1. Segments: Data with information of sectors and industries segments of stocks
+2. PriceSectors: Price of companies grouped by industries and sectors segments
+3. KeyMetrics: Key financial metrics of stock market and companies
+4. Historical prices: Stock market prices of companies
+
+
+After exhaustive analysis, the capacity of memory for this project is at 400 stock market symbols and because of that the 502 stocks will be reduced to 400 on each data
+
+- Segments:
+
+```{r Segments, cache = TRUE, warning = FALSE}
+
+segments <- Stock_Lists[1:400, ] %>% #Filter data for memory capacity
+            mutate(Company_Profile = map(symbol, ~GetCompanyProfile(API_Structure[2,4], company = ..1))) %>% #Get Data per symbol
+            select(Company_Profile) %>% #Select nested list
+            unnest() %>% # Unnest it
+            mutate(industry = case_when(industry == "" ~ "Funds", TRUE ~ industry), #Set sectors and industries empty as funds
+                   sector = case_when(sector == "" ~ "Funds", TRUE ~ sector)) %>%
+            select(symbol, companyName, industry, sector) #Select the data required for this dataframe
+
+glimpse(segments)
+
+```
+
+- PriceSectors:
+
+```{r PriceSectors, cache = TRUE, warning = FALSE}
+
+PriceSectors <- Stock_Lists[1:400, ] %>% #Filter data for memory capacity
+                mutate(Company_Profile = map(symbol, ~GetCompanyProfile(API_Structure[2,4],
+                                                                        company = ..1))) %>% #Get Data per symbol
+                select(Company_Profile) %>% #Select nested list
+                unnest() %>% # unnest it
+                mutate(industry = case_when(industry == "" ~ "Funds", TRUE ~ industry),  #Set sectors and industries empty as funds
+                       sector = case_when(sector == "" ~ "Funds", TRUE ~ sector))
+
+glimpse(PriceSectors)
+
+```
+
+- KeyMetrics:
+
+Since there are 57 metrics in the API dataset, a description of each metric and measure formula was created
+
+```{r MeasureDescriptions, cache = TRUE}
+#metrics
+path <- "Market KeyMetrics.xlsx"
+
+Metrics_Info <- path %>% 
+                excel_sheets() %>% 
+                set_names() %>% 
+                map(read_excel, path = path)
+
+
+kable(head(Metrics_Info$KeyMetrics), caption = "10 Metrics info") %>%
+  kable_styling(full_width = F)
+
+```
+
+
+```{r KeyMetrics, cache = TRUE}
+
+KeyMetrics <- Stock_Lists[1:400, ] %>% #Filter data for memory capacity
+              mutate(Company_Key_Metrics = map(symbol, ~GetData(API_Structure[8,4], company = ..1))) %>% #Get Data per symbol
+              select(symbol, name, Company_Key_Metrics) %>% #Select data and nested API data
+              unnest(Company_Key_Metrics) %>% # Unnest it
+              gather(key = "metric", value = "value", -symbol, -date, -name) %>% # Pivot the metrics per symbol
+              inner_join(segments, by = "symbol") %>% #Get segments data to enrich the dataset
+              inner_join(Metrics_Info$KeyMetrics, by = c("metric"="Metric")) %>% #Get the description and formula of metrics
+              select(-companyName) %>% # Remove duplicate columns
+              mutate(value = as.double(value), date = anydate(date)) %>% # Fix data structure
+              group_by(metric, Explanation, Formula) %>% # Nest data per metric
+              nest()
+
+
+glimpse(KeyMetrics)
+```
+
+- Historical prices:
+
+```{r HistoricalPrices,cache=TRUE}
+
+HistoricalPrices <- Stock_Lists[1:400, ] %>% #Filter data for memory capacity
+                    #Get Data per symbo
+                    mutate(Historical_Daily_Price = map(symbol, ~GetData(API_Structure[11,4],
+                                                                         company = ..1) %>%
+                                                                 mutate(date = anytime(date)))) %>%
+                    #Adjust monthly price
+                    mutate(Monthly_AdjPrice = map(Historical_Daily_Price,  ~..1 %>%
+                                                    tq_transmute(select = close,
+                                                                 mutate_fun = to.monthly,
+                                                                 indexAt = "lastof"))) %>%
+                    select(-price) %>% # Remove duplicated column
+                    inner_join(segments, by = "symbol") %>% #Enrich dataframe with segments data
+                    select(symbol:exchange, industry:sector, everything(), -companyName) #Select and organized data needed
+
+
+glimpse(HistoricalPrices)
+
+```
+
+
+
+## Overview of data {.tabset}
+
+### Industry & Sector
+
+Let's check the amount of companies per sector and industry segments
+
+```{r CompanySegments, fig.show='hold', cache = TRUE}
+
+p1 <- segments %>%
+      mutate(industry = fct_rev(fct_infreq(sector))) %>%
+      ggplot() +
+      aes(x = industry, fill = sector) +
+      geom_bar() +
+      coord_flip() +
+      scale_fill_hue() +
+      guides(fill = "none") + 
+      theme_minimal()+
+      labs(title = "Companies", subtitle = "per sector", y = "Companies", x = "Sector")
+
+p2 <- segments %>%
+      mutate(industry = fct_rev(fct_infreq(industry))) %>%
+      ggplot() +
+      aes(x = industry, fill = industry) +
+      geom_bar() +
+      coord_flip() +
+      scale_fill_hue() +
+      guides(fill = "none") + 
+      theme_minimal() +
+      labs(title = "Companies", subtitle = "per industry", y = "Companies")
+
+p1 | p2
+
+```
+
+Some discoveries on SP500 companies segments:
+
+1. The maximum amount of companies per sector is around 60 and it seems to be centered around 6 sectors and skewed to the right which could relate to some sectors having more companies in average or being more advantageous to the portfolio.
+
+2. Industries segments shows that 6 sectors are mixed in the amount of companies, having software, consumer packaged goods and banks as top amount of companies in SP500
+
+
+Now let's see how does price is distributed per segments:
+
+```{r PriceSegments, fig.show='hold', cache = TRUE}
+
+p1 <- PriceSectors %>%
+      mutate(industry = fct_reorder(sector, price)) %>%
+      ggplot() +
+      aes(x = industry, y = price, fill = sector) + 
+      geom_boxplot() +
+      scale_y_log10() +
+      coord_flip() +
+      scale_fill_hue() +
+      guides(fill = "none") + 
+      theme_minimal() +
+      labs(title = "Sector", subtitle = "Per log of price", x = "Sector")
+
+p2 <- PriceSectors %>%
+      mutate(industry = fct_reorder(industry, price)) %>%
+      ggplot() +
+      aes(x = industry, y = price, fill = industry) +
+      geom_boxplot() +
+      scale_y_log10() +
+      coord_flip() +
+      scale_fill_hue() +
+      guides(fill = "none") + 
+      theme_minimal()+
+      labs(title = "Industry", subtitle = "Per log of price")
+
+p1 | p2
+
+```
+
+It seems that price per sector is usually around at the same mean with some variability, this variabiity is explained by the huge aount of difference on industry segment. This means that industry segment is a better metric to evaluate the dispersion of price rather than sectors.
+
+
+Let's check the top/bottom 20 companies prices
+
+```{r PriceSegmentsTopBottom, fig.show='hold', cache = TRUE}
+
+p1 <- PriceSectors %>%
+      mutate(price = as.double(price)) %>%
+      arrange(-price) %>%
+      head(20) %>%
+      mutate(symbol = fct_reorder(symbol, price)) %>%
+      ggplot() +
+      aes(x = symbol, y = price, fill = sector) + 
+      geom_col() +
+      coord_flip() +
+      scale_fill_hue() +
+      theme_minimal() +
+      labs(title = "Top 20 companies", subtitle = "per price")
+
+p2 <- PriceSectors %>%
+      mutate(price = as.double(price)) %>%
+      filter(price > 0) %>%
+      arrange(price) %>%
+      head(20) %>%
+      mutate(symbol = fct_rev(fct_reorder(symbol, price))) %>%
+      ggplot() +
+      aes(x = symbol, y = price, fill = sector) + 
+      geom_col() +
+      coord_flip() +
+      scale_fill_hue() +
+      theme_minimal() +
+      labs(title = "Bottom 20 companies", subtitle = "per price")
+
+p1 | p2
+
+```
+
+It does seem that those 6 sectors variability grants them in general the top 20 and bottom companies price
+
+
+Now let's see how does risk is distributed per segments:
+
+```{r BetaSegments, fig.show='hold', cache = TRUE}
+
+p1 <- PriceSectors %>%
+      mutate(beta = as.double(beta)) %>%
+      mutate(industry = fct_reorder(sector, beta)) %>%
+      ggplot() +
+      aes(x = industry, y = beta, fill = sector) +
+      geom_boxplot() +
+      coord_flip() +
+      scale_fill_hue() +
+      guides(fill = "none") + 
+      theme_minimal() +
+      labs(title = "Sector", subtitle = "Per risk (Beta)", x = "Sector")
+
+p2 <- PriceSectors %>%
+      mutate(beta = as.double(beta)) %>%
+      mutate(industry = fct_reorder(industry, beta)) %>%
+      ggplot() +
+      aes(x = industry, y = beta, fill = industry) +
+      geom_boxplot() +
+      coord_flip() +
+      scale_fill_hue() +
+      guides(fill = "none") + 
+      theme_minimal() +
+      labs(title = "Industry", subtitle = "Per risk (Beta)")
+
+
+p1 | p2
+
+```
+
+It seems that risk per sector changes slightly and it's quite impressive to see that energy and basic materials are on the top risk sector. On industry side, it seems some oindustries have a lot of variability on risk and consulting & outsourcing industry is on the top, it seems counterintuitive, I was expected to see financial services and technology being riskier.
+
+
+### KeyMetrics
+
+Since there are 57 metrics, it's important to create a ggplot function and use it in each sector, this function will include in the labs of plot the brief explanation and the formula in order to help understand each metric
+
+```{r KeyMetricsPlotsFunct, cache = TRUE}
+
+plots <- function(data, metric, Explanation, Formula){
+    ggplot(data) +
+      aes(x = sector, y = value, fill = sector) +
+      geom_boxplot() +
+      scale_fill_hue() +
+      scale_y_continuous(trans = "log10") +
+      theme_minimal() +
+      coord_flip() + 
+      guides(fill = "none") + 
+      labs(title = metric, subtitle = Explanation, caption = paste0("Formula: ",Formula))
+}
+
+```
+
+
+- Plots:
+
+```{r KeyMetricsPlots, out.width=c('50%','50%'), echo=FALSE, cache = TRUE, warning = FALSE}
+KeyMetrics <- KeyMetrics %>%
+              mutate(plot = map(data, ~plots(..1, metric, str_wrap(Explanation,80), Formula)))
+
+
+walk(KeyMetrics$plot, plot)
+
+```
+
+
+It seems that some metrics could be correlated and many of them tends to have the same pattern per sectors. That lead us to the question on how to evaluate them in risk mitigation assets, this will be done in the next chapter.
+
+
+We can see that metrics that clearly show a difference in results per sectors are:
+
+1. Debt to equity
+2. Current ratio
+3. Interest coverage
+4. SG&A to revenue
+5. R&D to revenue
+6. Intangibles to assets
+7. Capex to operatig cash flow 
+9. Capex to revenue
+10. ROIC
+11. Return on tangible assets
+12. Working capital
+13. Tangible Asset Value 
+14. Average Inventory
+15. Days sales outstanding
+16. Days payables outstanding
+17. Days of inventory on hand
+18. Receivables turnover
+19. Inventory turnover
+20. ROE
+
+
+
+It is important to notice that x-axis is on log scale, that means that other metrics could be included as well
+
+Let's check how these metrics are correlated
+
+```{r MetricsCorrelation, cache=TRUE}
+
+KeyMetrics %>%
+    unnest(data) %>% 
+    ungroup() %>% #removes grouped data, otherwise select will bring grouped atributes as well
+    select(sector, metric, symbol, date,  value) %>% # select variables needed to spread
+    spread(key = metric, value = value) %>% # spread metrics to column that will be correlated
+    select(-sector, -symbol, -date) %>% # remove columns not needed
+    drop_na() %>% #Remove any na on metrics data, to fix correlation function return NA
+    cor() %>% # Apply correlation function
+    as.data.frame() %>% # Convert matrix class to data frame 
+    rownames_to_column("Metric") %>% # Include row names id from matrix to a column named data frame
+    gather( "metric", "correlation", -Metric) %>% # gather all correlation into a single column
+    filter(Metric != metric) %>% # Remove any metrics equal (That results in correlation 1)
+    arrange(-correlation) %>% # Arrange correlation, this will be used in id creation later
+    filter(correlation >= 0.8) %>% # Filter only correlations greater than 0.8
+    mutate(id = case_when(Metric == lag(metric, 1) ~ 1, TRUE ~ 0)) %>% # Column created to remove duplicates of metrics x metrics
+    filter(id == 1) %>% # Removing duplicates
+    select(-id) %>% # Removing aux column
+    kable(caption = "Correlation of metrics greather than 80%") %>%
+    kable_styling(full_width = F)
+
+```
+
+This is very interesting, it seems that 32 metrics have a correlation with one of these metrics by greather than 80% as we could see in the metrics plots.
+
+That actually makes sense because these metrics formulas are shared or have a common hierarchy formula variable.
+
+That still lead us the question of risk mitigation on portfolio assets to these metrics, even though they're correlated that doesn't mean that these assets will follow the same pattern. In the next chapter this will be analyzed
+
+### Price
+
+Let's take a look on market price in SP500 and per sector.
+
+
+```{r CandlestickSP500, cache = TRUE, warning=FALSE}
+
+#Candlestick for SP500
+HistoricalPrices %>%
+  select(sector, Historical_Daily_Price) %>%
+  unnest() %>%
+  group_by(date) %>%
+  summarise(close = mean(close), open = mean(open), low = mean(low), high = mean(high)) %>%
+  ggplot(aes(x = date, y = close)) +
+  geom_candlestick(aes(open = open, high = high, low = low, close = close)) +
+  labs(title = "SP500 Candlestick Chart", 
+       subtitle = "Mean OHLC per sector",
+       y = "Closing Price", x = "") + 
+  theme_tq()
+
+
+```
+
+This candlestick time series plot shows some very interesting analysis:
+
+1. Huge drop in the market due to coronavirus, it does seem to be one of the worst drops in the market for SP500.
+2. Market has a lot of drops and ups, but usually shows some trends upwards stoped by some peaked collapses that we know are related to economy breakdowns.
+
+Let's evaluate the same plot per sector
+
+```{r CandlestickSector, cache = TRUE, warning=FALSE}
+
+#Candlestick per sector
+Sector_Daily_OHLC <- HistoricalPrices %>%
+  select(sector, Historical_Daily_Price) %>%
+  unnest() %>%
+  group_by(sector,date) %>%
+  summarise(close = mean(close), open = mean(open), low = mean(low), high = mean(high))
+
+Sector_Daily_OHLC %>%
+  ggplot(aes(x = date, y = close, group = sector)) +
+  geom_candlestick(aes(open = open, high = high, low = low, close = close)) +
+  labs(title = "Sectors Candlestick Chart", 
+       subtitle = "Mean OHLC per sector",
+       y = "Closing Price", x = "") + 
+  facet_wrap(~ sector, ncol = 4, scale = "free_y") + 
+  theme_tq()
+
+```
+
+It does seem that all sectors were havily impacted, although technology and communication services were a bit less impacted in percent to its previous downfall price
+
+Another intereseting thing is that some sectors seems to have a similar pattern, by looking at them it seems we have 3 groups of sectors.
+
+Let's take a look on these clusters, we'll use a silhouette method to define the optimal amount of clusters in sectors price
+
+```{r SectorClusters, out.width=c('35%','65%'), cache=TRUE, warning=FALSE}
+
+Clustering <- function(Cluster_DF, Df_aux){
+  require(gridExtra)
+  require(ggdendro)
+  require(zoo)
+  require(purrr)
+  require(tsibble)
+  require(broom)
+  
+  
+  # Clustering
+  hc <- hclust(dist(t(Df_aux[,-1])), "ave")
+  
+  # 8.1 DF clusters
+  library(factoextra)
+  NbClust <- fviz_nbclust(Df_aux[,-1], FUN = hcut, method = "silhouette")
+  
+  
+  k <- which.max(NbClust$data$y)
+  
+  cut_avg <- cutree(hc, k = k) %>%
+    tidy() %>%
+    rename("Data"="names", "cluster"="x") 
+  
+  
+  # Number of clusters plot
+  NbClustersPlot <- plot(NbClust)
+  
+  ### Plot
+  hcdata <- dendro_data(hc)
+  names_order <- hcdata$labels$label
+  
+  # Use the folloing to remove labels from dendogram so not doubling up - but good for checking
+  hcdata$labels$label <- ''
+  p1 <- ggdendrogram(hcdata, rotate=TRUE, leaf_labels=FALSE)
+  
+  # Autoplot only accepts time series data type
+  Zoo_DF <- read.zoo(Df_aux)
+  
+  # Scale the time series and plot
+  maxs <- apply(Zoo_DF, 2, max)
+  mins <- apply(Zoo_DF, 2, min)
+  joined_ts_scales <- scale(Zoo_DF, center = mins, scale = maxs - mins)
+  
+  new_data <- joined_ts_scales[,rev(as.character(names_order))]
+  
+  p2 <- autoplot(new_data, facets = Series ~ . ) + 
+    xlab('') + ylab('') + theme(legend.position="none")
+  
+  gp1<-ggplotGrob(p1)
+  gp2<-ggplotGrob(p2) 
+  
+  grid <- grid.arrange(gp2, gp1, ncol=2, widths=c(4,2))
+  
+  
+  aux <- data.frame(Model_Name = Cluster_DF) %>%
+    mutate(Clustered = purrr::map(Model_Name, ~cut_avg),
+           hc = purrr::map(Model_Name, ~hc),
+           NbClust= purrr::map(Model_Name, ~NbClust),
+           NbClustersPlot= purrr::map(Model_Name, ~NbClustersPlot),
+           p1= purrr::map(Model_Name, ~p1),
+           p2= purrr::map(Model_Name, ~p2),
+           grid = purrr::map(Model_Name, ~grid)
+    )
+  
+  
+  return(aux)
+}
+
+
+Clust_DF <- Sector_Daily_OHLC %>%
+            select(sector, date, close) %>%
+            spread(sector, close) %>%
+            filter_all(all_vars(!is.na(.)))
+
+Clusters <- Clustering("Sectors", Clust_DF)
+
+
+```
+
+That's interesting! We have 2 groups of clusters, let's organize them:
+
+```{r ClustersDF, cache = TRUE}
+
+Clusters_sectors <- map_dfr(Clusters$Clustered, ~..1) %>%
+                    rename("sector"=Data) %>%
+                    arrange(cluster)
+
+
+kable(Clusters_sectors, caption = "Sector Clusters") %>%
+  kable_styling(full_width = F)
+
+
+```
+
+Now let's see how returns are ocurring annually per sector
+
+```{r AnnualReturns, cache=TRUE}
+
+#Annual returns per sectors
+HistoricalPrices %>%
+unnest(Monthly_AdjPrice) %>%
+group_by(sector) %>%
+tq_transmute(select = close, mutate_fun = periodReturn, period = "yearly", type = "arithmetic") %>%
+ggplot(aes(x = date, y = yearly.returns, fill = sector)) +
+  geom_col() +
+  geom_hline(yintercept = 0, color = palette_light()[[1]]) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Sectors: Annual Returns",
+       y = "Annual Returns", x = "") + 
+  facet_wrap(~ sector, ncol = 4, scales = "free_y") +
+  theme_tq() + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "none") + 
+  scale_fill_tq()
+
+```
+
+It seems that in general, the market has some downsides and upsides in annual return for all sectors, but it seems we have a huge drop on return untill this moment of 2020 due to coronavirus.
+
+Another interesting result from this plot is that some sectors have some good percentual margin increase, but thats could be done due to low price being affected by any trend just as it seems to occur with basic materials.
+
+The last analysis is to understand how prices moves quarterly, for that we'll get a min/max quarterly price per sector plot
+
+```{r QuarterlyMaxMin, cache=TRUE}
+
+#Quaterly max min per sector
+Sector_max_by_qtr <- HistoricalPrices %>%
+                      unnest(Historical_Daily_Price) %>%
+                      group_by(sector) %>%
+                      tq_transmute(select = close, mutate_fun = apply.quarterly, FUN= max,
+                                   col_rename = "max.close") %>%
+                      mutate(year.qtr = paste0(lubridate::year(date), "-Q",
+                                               lubridate::quarter(date))) %>%
+                      select(-date)
+
+
+
+Sector_min_by_qtr <- HistoricalPrices %>%
+        unnest(Historical_Daily_Price) %>%
+        group_by(sector) %>%
+        tq_transmute(select = close, mutate_fun = apply.quarterly,
+                     FUN= min, col_rename = "min.close") %>%
+        mutate(year.qtr = paste0(lubridate::year(date), "-Q",
+                                 lubridate::quarter(date))) %>%
+        select(-date)
+
+Sector_by_qtr <- left_join(Sector_max_by_qtr, Sector_min_by_qtr,
+                           by = c("sector" = "sector", "year.qtr" = "year.qtr"))
+
+
+Sector_by_qtr %>%
+  ggplot(aes(x = year.qtr, color = sector)) +
+  geom_segment(aes(xend = year.qtr, y = min.close, yend = max.close),
+               size = 1) +
+  geom_point(aes(y = max.close), size = 2) +
+  geom_point(aes(y = min.close), size = 2) +
+  facet_wrap(~ sector, ncol =4, scale = "free_y") +
+  labs(title = "Sector: Min/Max Price By Quarter",
+       y = "Stock Price", color = "") +
+  theme_tq() +
+  scale_color_tq() +
+  scale_y_continuous(labels = scales::dollar) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+```
+
+This is interesting, all sectors have as low price as zero as well as higher prices. This could mean that companies could be integrated into SP500 quaterly and therefore have low prices due to start in the market, or that the market variability is across all sectors evenly.
+
+The major difference is that some sectors are more variable than others, and there are those that achieve higher prices in the long run such as technology sectors
+
+
+## Portfolio Analysis {.tabset}
+
+### Sectors
+
+Let's make a portfolio with risk mitigation in order to evaluate how the optimization tries to deal with sector returns
+
+```{r SectorsPfData, cache = TRUE}
+
+Sector_Returns <- Sector_Daily_OHLC %>%
+                  group_by(sector) %>% 
+                  tq_transmute(select     = close, 
+                               mutate_fun = periodReturn, 
+                               period     = "daily", 
+                               col_rename = "close") %>%
+                  spread(sector, close) %>%
+                  filter_all(all_vars(!is.na(.))) %>%
+                  tk_xts(data = ., date_var = date, silent = TRUE)  #Its needed to run porfolio.spec
+
+charts.PerformanceSummary(Sector_Returns,main = "Sectors Performance", legend.loc = NULL)
+
+```
+
+
+Let's run the portfolio in order to minimize risk and evaluate it's sector allocation called weight
+
+```{r SectorsOPTPF, cache = TRUE}
+
+Optimize <- function(Returns){
+
+# Create the portfolio specification
+port_spec <- portfolio.spec(colnames(Returns)) %>%
+  
+  # Add a full investment constraint such that the weights sum to 1
+  add.constraint(portfolio = ., type = "full_investment") %>%
+  
+  # Add a long only constraint such that the weight of an asset is between 0 and 1
+  add.constraint(portfolio = ., type = "long_only") %>%
+  
+  # Add an objective to minimize portfolio standard deviation
+  add.objective(portfolio = ., type = "risk", name = "StdDev")
+
+# Solve the optimization problem
+opt <- optimize.portfolio(Returns, portfolio = port_spec,
+                          optimize_method = "ROI", trace=TRUE)
+
+
+return(opt)
+
+}
+
+
+SectorReturns <- Optimize(Sector_Returns) %>%
+                 extractWeights() %>%
+                 data.frame(Name = names(.), weights = round(.,3), row.names = NULL) %>%
+                 select(-.)
+
+
+```
+
+Let's plot these weights
+
+```{r PfSectorPlot, cache=TRUE}
+
+plots2 <- function(weights, sector=NULL){
+
+  plot <- weights %>%
+          mutate(Name = fct_reorder(Name, weights)) %>%
+          filter(weights > 0.01) %>%
+          ggplot(aes(x = Name, y=weights, fill = Name)) +
+          geom_col() + 
+          scale_fill_brewer(palette = "RdBu") +
+          theme_minimal() +
+          coord_flip() + 
+          guides(fill = "none") +
+          labs(title = paste0("Sectors ", sector))
+  
+  return(plot)
+  
+}
+
+
+plots2(SectorReturns)
+
+```
+
+Let's check how each company per sector is structured in this portfolio analysis.
+
+
+### Companies per sector
+
+Since there are 400 countries and the main idea here is to understand how metrics relate to risk mitigation, we'll record only the final result of the best and worst weight allocation of portfolio companies per sector
+
+
+```{r CompaniesPF, out.width=c('50%','50%'), cache=TRUE, warning=FALSE}
+
+#Since we have to model this grouped per sector, all this piece of script is doing is merging the same daily period return close and converting it to a xts date time based data grouped by sector with purrr and allowing symbol companies inside each sector list
+Symbol_Returns <- HistoricalPrices %>%
+  select(symbol,sector, Historical_Daily_Price) %>%
+  unnest() %>%
+  group_by(sector) %>%
+  nest() %>%
+  mutate(data = map(data, ~..1 %>%
+                          select(symbol, date, close) %>%
+                          group_by(symbol) %>%
+                          tq_transmute(select     = close, 
+                                       mutate_fun = periodReturn, 
+                                       period     = "daily", 
+                                       col_rename = "close") %>%
+                          spread(symbol, close) %>%
+                          filter_all(all_vars(!is.na(.))) %>%
+                          tk_xts(data = ., date_var = date, silent = TRUE)))
+  
+#Optimizing per each purrr list of sectors
+Symbol_Returns <- Symbol_Returns %>%
+                  mutate(optimize = map(data, ~Optimize(..1)))
+
+#Simple extract weights and organizing it to be able to plot
+Symbol_Returns <- Symbol_Returns %>%
+  mutate(weights = map(optimize, extractWeights),
+         weights = map(weights, ~data.frame(Name = names(..1),
+                                            weights = ..1, row.names = NULL)))
+
+
+#Extracting worst and best symbols and ploting each sector weigths
+Symbol_Returns <- Symbol_Returns %>%
+        mutate(Best = map(weights, ~ filter(..1, weights == max(weights)) %>%
+                            select(Name)),
+               Worst = map(weights, ~ filter(..1, weights == min(weights)) %>%
+                            select(Name)),
+               plots = map(weights, ~plots2(..1, sector)))
+
+
+walk(Symbol_Returns$plots, plot)
+
+
+```
+
+
+Now we can analyse each metric per best and worst companies allocated portfolio for risk mitigation.
+
+
+
+## KeyMetrics x Porfolio Mitigation {.tabset}
+
+
+### Best x Worst companies per sector
+
+All we have to do know is to include the best and worst companies per sector in the keyMetrics dataset and plot each metric including the position of both best and worst companies in order to understand if these metrics relate to a decision on risk mitigation portfolio
+
+
+```{r KeyMetricsxPf, echo=FALSE, cache = TRUE, warning = FALSE}
+
+#Organizing best and worst data to include in keyMetrics dataset
+Symbol_Returns_pf <- Symbol_Returns %>%
+                     select(sector, Best, Worst) %>%
+                     unnest() %>%
+                     rename("Best"="Name", "Worst"="Name1")
+
+# Join both best and worst companies inside the keymetrics dataframe
+KeyMetrics <- KeyMetrics %>%
+              mutate(data = map(data, ~..1 %>% inner_join(Symbol_Returns_pf, by = "sector")))
+
+#Update the keymetrics plot to include both best and worst companies as geom_point and geom_label
+plots3 <- function(data, metric, Explanation, Formula){
+  
+  Best <- filter(data, symbol == Best) %>%
+          group_by(symbol, sector) %>%
+          summarise(value = mean(value))
+  
+  Worst <- filter(data, symbol == Worst) %>%
+           group_by(symbol, sector) %>%
+           summarise(value = mean(value))
+  
+  
+  ggplot(data, aes(x = sector, y = value, fill = sector)) +
+    geom_boxplot() +
+    geom_point(data = Best, aes(x = sector, y = value), colour = "blue") +
+    geom_label(data=Best,aes(label=symbol), nudge_x = 0.3, nudge_y = 0.05,
+               size = 2, fill = "grey", colour = "blue") +
+    geom_point(data = Worst, aes(x = sector, y = value), colour = "red") +
+    geom_label(data=Worst,aes(label=symbol), nudge_x = 0.3, nudge_y = 0.05,
+               size = 2, fill = "grey", colour = "red") +
+    scale_fill_hue() +
+    scale_y_continuous(trans = "log10") +
+    theme_minimal() +
+    coord_flip() + 
+    guides(fill = "none") + 
+    labs(title = metric, subtitle = Explanation, caption = paste0("Formula: ",Formula))
+}
+
+
+#Apply the function
+KeyMetrics <- KeyMetrics %>%
+              mutate(plot2 = map(data, ~plots3(..1, metric, str_wrap(Explanation,80), Formula)))
+
+
+kable(Symbol_Returns_pf, caption = "Best and Worst company per Porfolio risk mitigation") %>%
+  kable_styling(full_width = F)
+
+```
+
+
+### Plots
+
+```{r PlotsKeyMxPf, out.width=c('50%','50%'), echo=FALSE, cache = TRUE, warning = FALSE}
+walk(KeyMetrics$plot2 , plot)
+```
+
+Thats awesome!! It does seem that some metrics and sector differ in relation to portfolio risk mitigation.
+
+Let's just remember first that:
+
+1. Sectors are correlated and we managed to find 2 clusters between them, this will be ignored in order to evaluate them per each sector
+
+2. Metrics are correlated and we found that 32 of them are strongly correlated, but the main goal of this project is to evaluate per metric how they infer as a good result or bad result for risk mitigation. This is important though, if you're willing to analyze any subject including these metrics together, the strongest correlation will bias your model.
+
+3. Prices have erratic movement that might injury any machine learning models and must be annomalized, this will be used for last chapter of this project when we model forecast for prices
+
+
+### Model
+
+In order to model this, we'll follow the strategy:
+
+1. List group sectors and get symbols weight the porftolio risk mitigation
+2. Model how each metric value associates to the risk weight
+
+In order to model it we'll use a GLM function from H2O wich consists of the formula:
+
+$$
+\hat {y} = {x^T}\beta + {\beta_0}
+$$
+Let's model it:
+
+```{r ListGroups, cache = TRUE, warning = FALSE}
+
+#Part 1
+ListGroups <- Symbol_Returns %>%
+              select(sector, weights) %>%
+              unnest() %>%
+              rename("symbol"="Name") #Rename to make it easier for innner join
+
+# Join weight symbols, remove sector from nested data and nest it again...
+KeyMetrics <- KeyMetrics %>%
+               mutate(data2 = map(data, ~..1 %>%
+                                   inner_join(ListGroups, by = c("sector","symbol"))))
+
+
+# Part 2
+
+#Let's create a function with h2o to help us model per sector
+
+h2o.init(max_mem_size = "5g")
+
+h2o.no_progress()
+
+H2o_Model <- function(Data,x, y){
+  require(h2o)
+  require(tidyverse)
+  require(purrr)
+  
+  Data$sector <- as.factor(Data$sector)
+  
+  Data_h2o <- as.h2o(Data)
+  
+  set.seed(123)
+  
+  automl_glm <- h2o.glm(
+    x = x, 
+    y = y,
+    training_frame = Data_h2o)
+  
+  Name_Model <- "H2O_GLM"
+  
+  coef <- h2o.coef(automl_glm) %>%
+          as.data.frame()
+  
+  #Model summary
+  CV_Summary <- h2o.performance(automl_glm)
+
+  #lime
+  # explainer <- lime(x = Data[,x],
+                       # model = automl_glm)
+
+  # explanation <- explain(x = Data[,x], explainer = explainer, bin_continuous = TRUE,
+                            # feature_select = "auto", n_features = 2)
+  
+  # Features_Plot <- plot_features(explanation,cases = 1)
+
+  aux <- data.frame(Model_Name = Name_Model) %>%
+    mutate(Model = map(Model_Name, ~automl_glm),
+           coefs = map(Model_Name, ~coef),
+           CV_Summary = map(Model_Name, ~CV_Summary)#,
+           #explanation = map(Model_Name, ~explanation),
+           #Features_Plot = map(Model_Name, ~Features_Plot)
+    )
+  
+  
+  return(aux)
+  
+}
+
+
+# Let's model
+KeyMetrics <- KeyMetrics %>%
+               mutate(H2o_Model = map(data2, ~H2o_Model(..1, x = c("value","sector"),
+                                                       y = "weights")))
+
+
+h2o.shutdown(prompt = F)
+
+
+#Organize coeficients for kable
+Coefiecients <- KeyMetrics %>%
+                mutate(coefs = map(H2o_Model, ~..1$coefs %>%
+                              reduce(as.data.frame) %>%
+                              rownames_to_column(var = "Parameter"))) %>%
+                ungroup() %>%
+                select(metric, coefs) %>%
+                unnest(coefs) %>%
+                rename("value" = ".") %>%
+                mutate(Parameter = gsub(Parameter, pattern = "sector.", replacement = "")) %>%
+                spread(key = Parameter, value = value) %>%
+                select(metric, Intercept, value, everything()) %>%
+                arrange(-Intercept, -value)
+
+```
+
+Let's check the coeficients
+
+
+```{r ModelCoeficients, cache=TRUE}
+kable(Coefiecients, caption = "Metrics coeficients per sectors", digits = 3) %>%
+   kable_styling(bootstrap_options = "striped", full_width = F, font_size = 10)
+
+```
+
+\breakline
+
+This is great! As showed in the charts before, it does seem that metrics and sectors differs between each other in terms of risk mitigation.
+
+In order to understand this table we must first understand how it works:
+
+1. The value is a weight multiplication to the metric value, when it's negative it means that metrics value that are negatives will deliver higher risk mitigation.
+2. When we get a difference between values and sector weights we can actually see that some sectors tend to increase or decrease the final risk mitigation by the metric
+
+That means that we can actually measure theses metrics by comparing the highest ratio of difference from value to sector values in regards of negative x positive weights in order to understand:
+
+1. Metrics that deliver the higher information gain for each sector
+2. Metrics that deliver higher information gain in overall
+
+This will not be done in this project.
+
+
+## Conclusion
+
+This projects seeked to evaluate how each metric is related to a risk mitigation in a portfolio and how it differs per sectors.
+
+For future projects we can measure:
+
+1. Metrics that deliver the higher information gain for each sector
+2. Metrics that deliver higher information gain in overall
+3. Impact of other variables such as macroeconomic metrics and sentiment analysis of news
+4. Predict the future price of models and re-model it for portfolio mitigation
+5. Compare companies that are not in SP500 or have lower prices but have a good result on metrics and assess how it is used for risk mitigation with a lower price bond
+
+
+```{r}
+sessionInfo()
+```
+
