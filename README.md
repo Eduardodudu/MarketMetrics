@@ -1,2 +1,0 @@
-# MarketMetrics
-Evaluate market metrics
